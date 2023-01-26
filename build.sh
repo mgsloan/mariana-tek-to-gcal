@@ -3,6 +3,7 @@ OUTPUT="MarianaTekToGCal.js"
 
 function add_file {
   cat "$1" >> "$OUTPUT";
+  echo >> "$OUTPUT";
 }
 
 echo -n '' > "$OUTPUT"

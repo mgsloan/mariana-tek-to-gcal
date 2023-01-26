@@ -23,16 +23,6 @@ function getDaysAgo(days) {
   return yesterday;
 }
 
-function withScriptProperties(f) {
-  const scriptProperties = PropertiesService.getScriptProperties();
-  const properties = scriptProperties.getProperties();
-  try {
-    return f(properties);
-  } finally {
-    scriptProperties.setProperties(properties, /* deleteAllOthers= */ true);
-  }
-}
-
 function parseDate(dateString) {
   const result = Date.parse(dateString)
   if (!result) {
