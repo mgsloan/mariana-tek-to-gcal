@@ -16,78 +16,92 @@ const LOCATION_TO_TARGET_CALENDAR = {
 };
 
 function syncMarianaTekToCalendar() {
-  const failures = [];
+  const fetchUpperBound = getDaysAgo(-DAYS_TO_FETCH);
+  Diagnostics.withErrorAggregation('Sync from MarianaTek to Calendar', diagnostics => {
+    diagnostics.setLogErrors(true);
+    const fetcher = new MarianaTekFetcher(BRAND, /* startDate= */ getDaysAgo(1));
+    let fetchNumber = 0;
+    while (true) {
+      fetchNumber += 1;
+      const response = diagnostics.withRateLimitingRetry('Fetch (#${fetchNumber})', () => fetcher.fetchPage());
 
-  // Start fetch a day ago to avoid any fiddly race conditions / time zone stuff.
-  const fetchMinTime = getDaysAgo(1);
+      if (response === null) {
+        return;
+      }
 
-  // Build class list request URL
-  const yesterdayDate = toUtcDateString(fetchMinTime);
-  let url = `https://${BRAND}.marianatek.com/api/customer/v1/classes?min_start_date=${yesterdayDate}`;
+      for (const session of response.results) {
+        syncSingleSessionToCalendar(diagnostics, session);
+      }
 
-  let fetchNumber = 1;
-  let moreToFetch = true;
-  while (moreToFetch) {
-    console.log(`Fetch #${fetchNumber} to ${url}`);
-
-    // Request class list
-    const rawResponse = UrlFetchApp.fetch(url, headers={'ACCEPT': 'application/json'});
-    const responseCode = rawResponse.getResponseCode();
-    if (responseCode !== 200) {
-      failures.push(`MarianaTek responded with ${rawResponse.getResponseCode()}:\n${rawResponse.getContentText()}`);
-      throw new Error(failures.join('\n'));
-    }
-    const response = JSON.parse(rawResponse.getContentText());
-
-    // console.log(response.results[0]);
-
-    // Import classes into calendar
-    for (const session of response.results) {
-      try {
-        const event = sessionToEvent(session);
-
-        // Only import events if they are missing / different in cache.
-        const cachedEvent = getCachedEvent(event.iCalUid);
-        if (event == cachedEvent) {
-          continue;
-        }
-
-        let targetCalendar;
-        if (LOCATION_TO_TARGET_CALENDAR) {
-          const location = session.location?.name;
-          if (!location) {
-            throw new Error('No location name to determine target calendar.');
-          }
-          targetCalendar = LOCATION_TO_TARGET_CALENDAR[location];
-          if (!targetCalendar) {
-            throw new Error(`No target calendar for location "${location}"`);
-          }
-        } else {
-          targetCalendar = DEFAULT_TARGET_CALENDAR;
-        }
-
-        Calendar.Events.import(event, targetCalendar);
-
-        // Update cache after import, so that if it fails it will be retried.
-        setCachedEvent(event);
-      } catch (e) {
-        failures.push(`When importing class ${session.name} with ID ${session.id}:\n${e.toString()}`);
+      const sessionTimes = response.results.map(session => parseDate(session.start_datetime).getTime());
+      const lastSessionEpochMillis = Math.max(...sessionTimes);
+      console.log(`Fetched up to ${new Date(lastSessionEpochMillis)}`);
+      console.log(`Errors: ${diagnostics.getErrorCount()}`);
+      console.log(`New Imports: ${importNumber}`);
+      console.log(`New Cancellations: ${cancelNumber}`);
+      if (lastSessionEpochMillis > fetchUpperBound.getTime()) {
+        return;
       }
     }
+  });
+}
 
-    const lastSessionEpochMillis = Math.max(...response.results.map(session => parseDate(session.start_datetime).getTime()));
-    console.log(`Fetched up to ${new Date(lastSessionEpochMillis)}`);
-    moreToFetch =
-      url != response.links.last &&
-      response.links.next &&
-      lastSessionEpochMillis < getDaysAgo(-DAYS_TO_FETCH).getTime();
+let importNumber = 0;
+let cancelNumber = 0;
 
-    fetchNumber += 1;
-    url = response.links.next;
-  }
+function syncSingleSessionToCalendar(diagnostics, session) {
+  const id = session.id;
+  diagnostics.withErrorRecording(`Processing "${session.name}" class with ID ${id}`, () => {
+    const event = sessionToEvent(session);
 
-  if (failures.length) {
-    throw new Error(failures.join('\n\n'));
+    // Only import events if they are missing / different in cache.
+    const cachedEvent = getCachedEvent(event.iCalUid);
+    if (event == cachedEvent) {
+      return;
+    }
+
+    const targetCalendar = getTargetCalendarForSession(session);
+    if (targetCalendar) {
+      if (event.status === 'cancelled') {
+        cancelNumber += 1;
+        diagnostics.withErrorRecording(null, () => {
+          diagnostics.withRateLimitingRetry(`Cancel calendar event (#${cancelNumber})`, () => {
+            Calendar.Events.remove(targetCalendar, event.id);
+          });
+        });
+      } else {
+        importNumber += 1;
+        diagnostics.withErrorRecording(null, () => {
+          diagnostics.withRateLimitingRetry(`Import to calendar (#${importNumber})`, () => {
+            Calendar.Events.import(event, targetCalendar);
+          });
+        });
+      }
+      // Update cache after delete or import, so that if it fails it
+      // will be retried.
+      setCachedEvent(event);
+    } else {
+      // FIXME: warning / info?
+    }
+  });
+}
+
+function getTargetCalendarForSession(session) {
+  let targetCalendar;
+  if (LOCATION_TO_TARGET_CALENDAR) {
+    const location = session.location?.name;
+    if (!location) {
+      throw new Error('No location name to determine target calendar.');
+    }
+    targetCalendar = LOCATION_TO_TARGET_CALENDAR[location];
+    if (!targetCalendar) {
+      throw new Error(`No target calendar for location "${location}"`);
+    }
+  } else if (DEFAULT_TARGET_CALENDAR) {
+    targetCalendar = DEFAULT_TARGET_CALENDAR;
+  } else {
+    // TODO: error type that does full abort?
+    throw new Error('Invalid target calendar configuration.');
   }
 }
 
@@ -111,6 +125,10 @@ function setCachedEvent(event) {
 }
 
 function sessionToEvent(session) {
+  if (session.is_cancelled) {
+    return { status: 'cancelled', id: session.id };
+  }
+
   let summary = session.name;
 
   const names = session.instructors.map(x => x.name.trim()).filter(x => x);
@@ -144,6 +162,7 @@ function sessionToEvent(session) {
   const endDateTime = new Date(startDateTime.getTime() + durationMillis);
 
   const result = {
+    status: 'confirmed',
     iCalUID: session.id,
     summary: summary,
     description: description,
@@ -218,5 +237,176 @@ function toUtcDateString(datetime) {
   return datetime.getUTCFullYear().toString() + '-' +
     (datetime.getUTCMonth() + 1).toString().padStart(2, '0') + '-' +
     datetime.getUTCDate().toString().padStart(2, '0');
+}
+
+
+/**
+ * The purpose of this class is to make it easy to have script
+ * execution carry on despite errors, and report these errors with a
+ * comprehensible structure.
+ */
+class Diagnostics {
+  /**
+   * Runs the provided function, and passes it an instance of this
+   * class. At the end of execution, if any errors were recorded then
+   * they will be reported in a single error that concatenates their
+   * messages.
+   *
+   * Usage of the instance of this class after this returns is invalid
+   * and will throw an error.
+   */
+  static withErrorAggregation(contextString, f) {
+    const instance = new Diagnostics;
+    instance.__errors = [];
+    instance.__contexts = [];
+    instance.__logErrors = false;
+    instance.__exited = false;
+    return instance.withContext(contextString, () => {
+      try {
+        return f(instance);
+      } catch (e) {
+        instance.reportError(e);
+      } finally {
+        if (instance.__errors.length > 0) {
+          throw new Error(instance.__makeAggregateErrorMessage());
+        }
+        instance.__exited = true;
+      }
+    });
+  }
+
+  /**
+   * Setting this to true will cause failures to also be immediately
+   * logged. This is helpful during development.
+   */
+  setLogErrors(logErrors) {
+    this.__logErrors = logErrors;
+  }
+
+  /** Add an error to the list. */
+  reportError(message) {
+    if (typeof message !== 'string') {
+      message = message.stack || message.toString();
+    }
+    const error = {
+      context: [...this.__contexts],
+      message: message,
+    };
+    if (this.__logErrors) {
+      console.error(message);
+    }
+    this.__errors.push(error);
+  }
+
+  /**
+   * Runs the provided function within a named context. If an error is thrown it is recorded, and execution continues.
+   */
+  withErrorRecording(contextString, f) {
+    return this.withContext(contextString, () => {
+      try {
+        return f();
+      } catch (e) {
+        this.reportError(e);
+      }
+      return null;
+    });
+  }
+
+  /**
+   */
+  withRateLimitingRetry(contextString, f) {
+    return this.withContext(contextString, () => {
+      let retryCount = 0;
+      while (true) {
+        try {
+          return f();
+        } catch (e) {
+          if (e.toString().includes('Rate Limit Exceeded')) {
+            Utilities.sleep(1000);
+            retryCount += 1;
+            console.log(`Retry #${retryCount} for ${contextString} slept for 1 second due to Rate Limiting.`);
+          } else {
+            throw e
+          }
+        }
+      };
+    });
+  }
+
+  /**
+   * Runs the provided function within a named context. Does not catch errors.
+   */
+  // TODO: decorate exceptions
+  withContext(contextString, f) {
+    if (contextString) {
+      this.__contexts.push(contextString);
+    }
+    let result = null;
+    try {
+      result = f();
+    } finally {
+      if (contextString) {
+        const poppedContextString = this.__contexts.pop();
+        if (poppedContextString !== contextString) {
+            this.__internalError('popped context string did not match pushed.');
+        }
+      }
+    }
+    return result;
+  }
+
+  getErrorCount() {
+    return this.__errors.length;
+  }
+
+  __internalError(message) {
+    this.logError(`Internal error in Diagnostics: ${message}`);
+  }
+
+  __makeAggregateErrorMessage() {
+    let lastContext = [];
+    let result = '\n\n';
+    for (const error of this.__errors) {
+      const context = error.context;
+      let i = 0;
+      // Find common prefix
+      for (; i < lastContext.length && i < context.length; i++) {
+        if (lastContext[i] !== context[i]) {
+          break;
+        }
+      }
+      // Add remaining contexts
+      for (; i < context.length; i++) {
+        result += ' '.repeat(i * 4) + context[i] + '\n';
+      }
+      // Add message
+      result += ' '.repeat(i * 4) + error.message + '\n\n';
+      lastContext = context;
+    }
+    return result;
+  }
+}
+
+class MarianaTekFetcher {
+  constructor(brand, startDate) {
+    this.brand = brand;
+    const dateString = toUtcDateString(startDate);
+    this.url =
+      `https://${BRAND}.marianatek.com/api/customer/v1/classes?min_start_date=${dateString}`;
+  }
+
+  fetchPage() {
+    if (!this.url) {
+      return null;
+    }
+    const rawResponse = UrlFetchApp.fetch(this.url, { headers: {'ACCEPT': 'application/json'}});
+    const responseCode = rawResponse.getResponseCode();
+    if (responseCode !== 200) {
+      throw new Error(`MarianaTek responded with ${rawResponse.getResponseCode()}:\n${rawResponse.getContentText()}`);
+    }
+    const response = JSON.parse(rawResponse.getContentText());
+    this.url = response.links?.next;
+    return response;
+  }
 }
 

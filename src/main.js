@@ -1,76 +1,90 @@
 function syncMarianaTekToCalendar() {
-  const failures = [];
+  const fetchUpperBound = getDaysAgo(-DAYS_TO_FETCH);
+  Diagnostics.withErrorAggregation('Sync from MarianaTek to Calendar', diagnostics => {
+    diagnostics.setLogErrors(true);
+    const fetcher = new MarianaTekFetcher(BRAND, /* startDate= */ getDaysAgo(1));
+    let fetchNumber = 0;
+    while (true) {
+      fetchNumber += 1;
+      const response = diagnostics.withRateLimitingRetry('Fetch (#${fetchNumber})', () => fetcher.fetchPage());
 
-  // Start fetch a day ago to avoid any fiddly race conditions / time zone stuff.
-  const fetchMinTime = getDaysAgo(1);
+      if (response === null) {
+        return;
+      }
 
-  // Build class list request URL
-  const yesterdayDate = toUtcDateString(fetchMinTime);
-  let url = `https://${BRAND}.marianatek.com/api/customer/v1/classes?min_start_date=${yesterdayDate}`;
+      for (const session of response.results) {
+        syncSingleSessionToCalendar(diagnostics, session);
+      }
 
-  let fetchNumber = 1;
-  let moreToFetch = true;
-  while (moreToFetch) {
-    console.log(`Fetch #${fetchNumber} to ${url}`);
-
-    // Request class list
-    const rawResponse = UrlFetchApp.fetch(url, headers={'ACCEPT': 'application/json'});
-    const responseCode = rawResponse.getResponseCode();
-    if (responseCode !== 200) {
-      failures.push(`MarianaTek responded with ${rawResponse.getResponseCode()}:\n${rawResponse.getContentText()}`);
-      throw new Error(failures.join('\n'));
-    }
-    const response = JSON.parse(rawResponse.getContentText());
-
-    // console.log(response.results[0]);
-
-    // Import classes into calendar
-    for (const session of response.results) {
-      try {
-        const event = sessionToEvent(session);
-
-        // Only import events if they are missing / different in cache.
-        const cachedEvent = getCachedEvent(event.iCalUid);
-        if (event == cachedEvent) {
-          continue;
-        }
-
-        let targetCalendar;
-        if (LOCATION_TO_TARGET_CALENDAR) {
-          const location = session.location?.name;
-          if (!location) {
-            throw new Error('No location name to determine target calendar.');
-          }
-          targetCalendar = LOCATION_TO_TARGET_CALENDAR[location];
-          if (!targetCalendar) {
-            throw new Error(`No target calendar for location "${location}"`);
-          }
-        } else {
-          targetCalendar = DEFAULT_TARGET_CALENDAR;
-        }
-
-        Calendar.Events.import(event, targetCalendar);
-
-        // Update cache after import, so that if it fails it will be retried.
-        setCachedEvent(event);
-      } catch (e) {
-        failures.push(`When importing class ${session.name} with ID ${session.id}:\n${e.toString()}`);
+      const sessionTimes = response.results.map(session => parseDate(session.start_datetime).getTime());
+      const lastSessionEpochMillis = Math.max(...sessionTimes);
+      console.log(`Fetched up to ${new Date(lastSessionEpochMillis)}`);
+      console.log(`Errors: ${diagnostics.getErrorCount()}`);
+      console.log(`New Imports: ${importNumber}`);
+      console.log(`New Cancellations: ${cancelNumber}`);
+      if (lastSessionEpochMillis > fetchUpperBound.getTime()) {
+        return;
       }
     }
+  });
+}
 
-    const lastSessionEpochMillis = Math.max(...response.results.map(session => parseDate(session.start_datetime).getTime()));
-    console.log(`Fetched up to ${new Date(lastSessionEpochMillis)}`);
-    moreToFetch =
-      url != response.links.last &&
-      response.links.next &&
-      lastSessionEpochMillis < getDaysAgo(-DAYS_TO_FETCH).getTime();
+let importNumber = 0;
+let cancelNumber = 0;
 
-    fetchNumber += 1;
-    url = response.links.next;
-  }
+function syncSingleSessionToCalendar(diagnostics, session) {
+  const id = session.id;
+  diagnostics.withErrorRecording(`Processing "${session.name}" class with ID ${id}`, () => {
+    const event = sessionToEvent(session);
 
-  if (failures.length) {
-    throw new Error(failures.join('\n\n'));
+    // Only import events if they are missing / different in cache.
+    const cachedEvent = getCachedEvent(event.iCalUid);
+    if (event == cachedEvent) {
+      return;
+    }
+
+    const targetCalendar = getTargetCalendarForSession(session);
+    if (targetCalendar) {
+      if (event.status === 'cancelled') {
+        cancelNumber += 1;
+        diagnostics.withErrorRecording(null, () => {
+          diagnostics.withRateLimitingRetry(`Cancel calendar event (#${cancelNumber})`, () => {
+            Calendar.Events.remove(targetCalendar, event.id);
+          });
+        });
+      } else {
+        importNumber += 1;
+        diagnostics.withErrorRecording(null, () => {
+          diagnostics.withRateLimitingRetry(`Import to calendar (#${importNumber})`, () => {
+            Calendar.Events.import(event, targetCalendar);
+          });
+        });
+      }
+      // Update cache after delete or import, so that if it fails it
+      // will be retried.
+      setCachedEvent(event);
+    } else {
+      // FIXME: warning / info?
+    }
+  });
+}
+
+function getTargetCalendarForSession(session) {
+  let targetCalendar;
+  if (LOCATION_TO_TARGET_CALENDAR) {
+    const location = session.location?.name;
+    if (!location) {
+      throw new Error('No location name to determine target calendar.');
+    }
+    targetCalendar = LOCATION_TO_TARGET_CALENDAR[location];
+    if (!targetCalendar) {
+      throw new Error(`No target calendar for location "${location}"`);
+    }
+  } else if (DEFAULT_TARGET_CALENDAR) {
+    targetCalendar = DEFAULT_TARGET_CALENDAR;
+  } else {
+    // TODO: error type that does full abort?
+    throw new Error('Invalid target calendar configuration.');
   }
 }
 
@@ -94,6 +108,10 @@ function setCachedEvent(event) {
 }
 
 function sessionToEvent(session) {
+  if (session.is_cancelled) {
+    return { status: 'cancelled', id: session.id };
+  }
+
   let summary = session.name;
 
   const names = session.instructors.map(x => x.name.trim()).filter(x => x);
@@ -127,6 +145,7 @@ function sessionToEvent(session) {
   const endDateTime = new Date(startDateTime.getTime() + durationMillis);
 
   const result = {
+    status: 'confirmed',
     iCalUID: session.id,
     summary: summary,
     description: description,
