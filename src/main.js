@@ -86,6 +86,7 @@ function getTargetCalendarForSession(session) {
     // TODO: error type that does full abort?
     throw new Error('Invalid target calendar configuration.');
   }
+  return targetCalendar;
 }
 
 const SCRIPT_CACHE = CacheService.getScriptCache();
