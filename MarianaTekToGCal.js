@@ -19,15 +19,17 @@ function syncMarianaTekToCalendar() {
   const fetchUpperBound = getDaysAgo(-DAYS_TO_FETCH);
   Diagnostics.withErrorAggregation('Sync from MarianaTek to Calendar', diagnostics => {
     diagnostics.setLogErrors(true);
-    const fetcher = new MarianaTekFetcher(BRAND, /* startDate= */ getDaysAgo(1));
+    const fetcher = new MarianaTekFetcher(BRAND, /* startDate= */ getDaysAgo(5));
     let fetchNumber = 0;
     while (true) {
       fetchNumber += 1;
-      const response = diagnostics.withRateLimitingRetry('Fetch (#${fetchNumber})', () => fetcher.fetchPage());
+      const response = diagnostics.withRateLimitingRetry('Fetch (#${fetchNumber})', 10, () => fetcher.fetchPage());
 
       if (response === null) {
         return;
       }
+
+      console.log(`Fetched ${response.results.length} classes`);
 
       for (const session of response.results) {
         syncSingleSessionToCalendar(diagnostics, session);
@@ -35,10 +37,11 @@ function syncMarianaTekToCalendar() {
 
       const sessionTimes = response.results.map(session => parseDate(session.start_datetime).getTime());
       const lastSessionEpochMillis = Math.max(...sessionTimes);
-      console.log(`Fetched up to ${new Date(lastSessionEpochMillis)}`);
-      console.log(`Errors: ${diagnostics.getErrorCount()}`);
-      console.log(`New Imports: ${importNumber}`);
-      console.log(`New Cancellations: ${cancelNumber}`);
+      console.log(`Synced up to ${new Date(lastSessionEpochMillis)}`);
+      console.log(`Cumulative Errors: ${diagnostics.getErrorCount()}`);
+      console.log(`Cumulative Syncs: ${syncNumber}`);
+      console.log(`Cumulative Cancellations: ${cancelNumber}`);
+      console.log(`Cumulative Skipped (cached): ${cachedNumber}`);
       if (lastSessionEpochMillis > fetchUpperBound.getTime()) {
         return;
       }
@@ -46,42 +49,38 @@ function syncMarianaTekToCalendar() {
   });
 }
 
-let importNumber = 0;
+let syncNumber= 0;
 let cancelNumber = 0;
+let cachedNumber = 0;
 
 function syncSingleSessionToCalendar(diagnostics, session) {
   const id = session.id;
   diagnostics.withErrorRecording(`Processing "${session.name}" class with ID ${id}`, () => {
     const event = sessionToEvent(session);
 
-    // Only import events if they are missing / different in cache.
-    const cachedEvent = getCachedEvent(event.iCalUid);
-    if (event == cachedEvent) {
+    // Only import events if they are missing or different in cache.
+    if (checkEventAlreadySynced(event)) {
+      cachedNumber += 1;
       return;
     }
 
     const targetCalendar = getTargetCalendarForSession(session);
-    if (targetCalendar) {
-      if (event.status === 'cancelled') {
-        cancelNumber += 1;
-        diagnostics.withErrorRecording(null, () => {
-          diagnostics.withRateLimitingRetry(`Cancel calendar event (#${cancelNumber})`, () => {
-            Calendar.Events.remove(targetCalendar, event.id);
-          });
+    if (event.status === 'cancelled') {
+      cancelNumber += 1;
+      diagnostics.withErrorRecording(null, () => {
+        diagnostics.withRateLimitingRetry(`Cancel calendar event (#${cancelNumber})`, 10, () => {
+          Calendar.Events.remove(targetCalendar, event.id);
         });
-      } else {
-        importNumber += 1;
-        diagnostics.withErrorRecording(null, () => {
-          diagnostics.withRateLimitingRetry(`Import to calendar (#${importNumber})`, () => {
-            Calendar.Events.import(event, targetCalendar);
-          });
-        });
-      }
-      // Update cache after delete or import, so that if it fails it
-      // will be retried.
-      setCachedEvent(event);
+        setCachedEvent(event);
+      });
     } else {
-      // FIXME: warning / info?
+      syncNumber += 1;
+      diagnostics.withErrorRecording(null, () => {
+        diagnostics.withRateLimitingRetry(`Sync to calendar (#${syncNumber})`, 10, () => {
+          Calendar.Events.import(event, targetCalendar);
+        });
+        setCachedEvent(event);
+      });
     }
   });
 }
@@ -103,6 +102,7 @@ function getTargetCalendarForSession(session) {
     // TODO: error type that does full abort?
     throw new Error('Invalid target calendar configuration.');
   }
+  return targetCalendar;
 }
 
 const SCRIPT_CACHE = CacheService.getScriptCache();
@@ -110,12 +110,18 @@ const SCRIPT_CACHE = CacheService.getScriptCache();
 const EVENT_CACHE_PREFIX = 'Class ';
 const CACHE_TTL = 60 * 60 * 2; // two hours
 
-function getCachedEvent(id) {
-  const value = SCRIPT_CACHE.get(EVENT_CACHE_PREFIX + id);
-  if (value) {
-    return JSON.parse(value);
-  }
-  return null;
+/**
+ * Returns true if the event matches the cached event, indicating it
+ * has already been synced to the calendar. This checks that the data
+ * is the same as well, to support changes to the event generation
+ * logic or configuration.
+ */
+function checkEventAlreadySynced(event) {
+  const cachedEvent = SCRIPT_CACHE.get(EVENT_CACHE_PREFIX + event.iCalUID);
+  // JSON serialization is used for deep equality, which may
+  // not work if attribute order differs. Thankfully here it
+  // does not differ.
+  return cachedEvent && cachedEvent == JSON.stringify(event);
 }
 
 function setCachedEvent(event) {
@@ -239,9 +245,10 @@ function toUtcDateString(datetime) {
     datetime.getUTCDate().toString().padStart(2, '0');
 }
 
+const scriptStartTime = new Date();
 
 /**
- * The purpose of this class is to make it easy to have script
+ * The purpose of this class is to make it easy to have Apps Script
  * execution carry on despite errors, and report these errors with a
  * comprehensible structure.
  */
@@ -260,15 +267,24 @@ class Diagnostics {
     instance.__errors = [];
     instance.__contexts = [];
     instance.__logErrors = false;
+    // Attempt to exit more informatively by limiting execution time
+    // to 10 seconds less than the 6 minute limit.
+    instance.__executionTimeLimitMillis = (60 * 6 - 10) * 1000;
     instance.__exited = false;
     return instance.withContext(contextString, () => {
+      let mainErrorWasTimeLimitExceeded = false;
       try {
-        return f(instance);
-      } catch (e) {
-        instance.reportError(e);
+        try {
+          return f(instance);
+        } catch (e) {
+          mainErrorWasTimeLimitExceeded = e instanceof ScriptExecutionTimeLimitExceeded;
+          instance.reportError(e);
+        }
       } finally {
-        if (instance.__errors.length > 0) {
-          throw new Error(instance.__makeAggregateErrorMessage());
+        if (instance.__errors.length === 1 && mainErrorWasTimeLimitExceeded) {
+          throw new ScriptExecutionTimeLimitExceeded();
+        } else if (instance.__errors.length > 0) {
+          throw new MultiError(instance.__errors);
         }
         instance.__exited = true;
       }
@@ -276,17 +292,33 @@ class Diagnostics {
   }
 
   /**
-   * Setting this to true will cause failures to also be immediately
-   * logged. This is helpful during development.
+   * Set this to true to cause failures to also be immediately logged.
+   * This is particularly helpful during development.
    */
   setLogErrors(logErrors) {
     this.__logErrors = logErrors;
   }
 
+  /**
+   * Set this to some value less than the Apps Script execution time
+   * limit (typically 6 minutes). Set to null to disable time limit
+   * checking.
+   */
+  setExecutionTimeLimitMillis(millis) {
+    this.__executionTimeLimitMillis = millis;
+  }
+
+  /** Get current count of recorded errors. */
+  getErrorCount() {
+    return this.__errors.length;
+  }
+
   /** Add an error to the list. */
   reportError(message) {
     if (typeof message !== 'string') {
-      message = message.stack || message.toString();
+      message = message.stack
+        || (message.toString && message.toString())
+        || message;
     }
     const error = {
       context: [...this.__contexts],
@@ -296,16 +328,22 @@ class Diagnostics {
       console.error(message);
     }
     this.__errors.push(error);
+    this.checkScriptTimeLimit();
   }
 
   /**
-   * Runs the provided function within a named context. If an error is thrown it is recorded, and execution continues.
+   * Runs the provided function within a named context. If an error is
+   * thrown it is recorded, and execution continues.
    */
   withErrorRecording(contextString, f) {
     return this.withContext(contextString, () => {
       try {
+        this.checkScriptTimeLimit();
         return f();
       } catch (e) {
+        if (e instanceof ScriptExecutionTimeLimitExceeded) {
+          throw e;
+        }
         this.reportError(e);
       }
       return null;
@@ -313,23 +351,28 @@ class Diagnostics {
   }
 
   /**
+   * Runs the provided function and retries it after sleeping 2 seconds
+   * if it throws an error that looks like Apps Script rate limiting.
+   * Retry count is limited to the number passed to 'retryLimit'.
    */
-  withRateLimitingRetry(contextString, f) {
+  withRateLimitingRetry(contextString, retryLimit, f) {
     return this.withContext(contextString, () => {
       let retryCount = 0;
-      while (true) {
+      while (retryCount < retryLimit) {
+        this.checkScriptTimeLimit();
         try {
           return f();
         } catch (e) {
           if (e.toString().includes('Rate Limit Exceeded')) {
-            Utilities.sleep(1000);
+            Utilities.sleep(2000);
             retryCount += 1;
-            console.log(`Retry #${retryCount} for ${contextString} slept for 1 second due to Rate Limiting.`);
+            console.log(`Retry #${retryCount} for ${contextString} slept for 2 seconds due to Rate Limiting.`);
           } else {
-            throw e
+            throw e;
           }
         }
       };
+      throw new Error(`Failed #${retryLimit} retries of ${contextString}.`);
     });
   }
 
@@ -344,6 +387,7 @@ class Diagnostics {
     let result = null;
     try {
       result = f();
+      this.checkScriptTimeLimit();
     } finally {
       if (contextString) {
         const poppedContextString = this.__contexts.pop();
@@ -355,18 +399,30 @@ class Diagnostics {
     return result;
   }
 
-  getErrorCount() {
-    return this.__errors.length;
+  /**
+   * Check whether the script is near the time limit, and throw an
+   * error if so. This function is invoked by most other methods in
+   * this class, so you may not need to manually call this.
+   */
+  checkScriptTimeLimit() {
+    if (this.__executionTimeLimitMillis === null) {
+      return;
+    }
+    if (new Date() - scriptStartTime > this.__executionTimeLimitMillis) {
+      throw new ScriptExecutionTimeLimitExceeded();
+    }
   }
 
   __internalError(message) {
     this.logError(`Internal error in Diagnostics: ${message}`);
   }
+}
 
-  __makeAggregateErrorMessage() {
+class MultiError extends Error {
+  constructor(errors) {
     let lastContext = [];
-    let result = '\n\n';
-    for (const error of this.__errors) {
+    let message = '\n\n';
+    for (const error of errors) {
       const context = error.context;
       let i = 0;
       // Find common prefix
@@ -377,13 +433,20 @@ class Diagnostics {
       }
       // Add remaining contexts
       for (; i < context.length; i++) {
-        result += ' '.repeat(i * 4) + context[i] + '\n';
+        message += ' '.repeat(i * 4) + context[i] + '\n';
       }
       // Add message
-      result += ' '.repeat(i * 4) + error.message + '\n\n';
+      message += ' '.repeat(i * 4) + error.message + '\n\n';
       lastContext = context;
     }
-    return result;
+    super(message);
+    this.errors = errors;
+  }
+}
+
+class ScriptExecutionTimeLimitExceeded extends Error {
+  constructor() {
+    super("Script execution time limit exceeded.");
   }
 }
 

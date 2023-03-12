@@ -2,15 +2,17 @@ function syncMarianaTekToCalendar() {
   const fetchUpperBound = getDaysAgo(-DAYS_TO_FETCH);
   Diagnostics.withErrorAggregation('Sync from MarianaTek to Calendar', diagnostics => {
     diagnostics.setLogErrors(true);
-    const fetcher = new MarianaTekFetcher(BRAND, /* startDate= */ getDaysAgo(1));
+    const fetcher = new MarianaTekFetcher(BRAND, /* startDate= */ getDaysAgo(5));
     let fetchNumber = 0;
     while (true) {
       fetchNumber += 1;
-      const response = diagnostics.withRateLimitingRetry('Fetch (#${fetchNumber})', () => fetcher.fetchPage());
+      const response = diagnostics.withRateLimitingRetry('Fetch (#${fetchNumber})', 10, () => fetcher.fetchPage());
 
       if (response === null) {
         return;
       }
+
+      console.log(`Fetched ${response.results.length} classes`);
 
       for (const session of response.results) {
         syncSingleSessionToCalendar(diagnostics, session);
@@ -18,10 +20,11 @@ function syncMarianaTekToCalendar() {
 
       const sessionTimes = response.results.map(session => parseDate(session.start_datetime).getTime());
       const lastSessionEpochMillis = Math.max(...sessionTimes);
-      console.log(`Fetched up to ${new Date(lastSessionEpochMillis)}`);
-      console.log(`Errors: ${diagnostics.getErrorCount()}`);
-      console.log(`New Imports: ${importNumber}`);
-      console.log(`New Cancellations: ${cancelNumber}`);
+      console.log(`Synced up to ${new Date(lastSessionEpochMillis)}`);
+      console.log(`Cumulative Errors: ${diagnostics.getErrorCount()}`);
+      console.log(`Cumulative Syncs: ${syncNumber}`);
+      console.log(`Cumulative Cancellations: ${cancelNumber}`);
+      console.log(`Cumulative Skipped (cached): ${cachedNumber}`);
       if (lastSessionEpochMillis > fetchUpperBound.getTime()) {
         return;
       }
@@ -29,42 +32,38 @@ function syncMarianaTekToCalendar() {
   });
 }
 
-let importNumber = 0;
+let syncNumber= 0;
 let cancelNumber = 0;
+let cachedNumber = 0;
 
 function syncSingleSessionToCalendar(diagnostics, session) {
   const id = session.id;
   diagnostics.withErrorRecording(`Processing "${session.name}" class with ID ${id}`, () => {
     const event = sessionToEvent(session);
 
-    // Only import events if they are missing / different in cache.
-    const cachedEvent = getCachedEvent(event.iCalUid);
-    if (event == cachedEvent) {
+    // Only import events if they are missing or different in cache.
+    if (checkEventAlreadySynced(event)) {
+      cachedNumber += 1;
       return;
     }
 
     const targetCalendar = getTargetCalendarForSession(session);
-    if (targetCalendar) {
-      if (event.status === 'cancelled') {
-        cancelNumber += 1;
-        diagnostics.withErrorRecording(null, () => {
-          diagnostics.withRateLimitingRetry(`Cancel calendar event (#${cancelNumber})`, () => {
-            Calendar.Events.remove(targetCalendar, event.id);
-          });
+    if (event.status === 'cancelled') {
+      cancelNumber += 1;
+      diagnostics.withErrorRecording(null, () => {
+        diagnostics.withRateLimitingRetry(`Cancel calendar event (#${cancelNumber})`, 10, () => {
+          Calendar.Events.remove(targetCalendar, event.id);
         });
-      } else {
-        importNumber += 1;
-        diagnostics.withErrorRecording(null, () => {
-          diagnostics.withRateLimitingRetry(`Import to calendar (#${importNumber})`, () => {
-            Calendar.Events.import(event, targetCalendar);
-          });
-        });
-      }
-      // Update cache after delete or import, so that if it fails it
-      // will be retried.
-      setCachedEvent(event);
+        setCachedEvent(event);
+      });
     } else {
-      // FIXME: warning / info?
+      syncNumber += 1;
+      diagnostics.withErrorRecording(null, () => {
+        diagnostics.withRateLimitingRetry(`Sync to calendar (#${syncNumber})`, 10, () => {
+          Calendar.Events.import(event, targetCalendar);
+        });
+        setCachedEvent(event);
+      });
     }
   });
 }
@@ -94,12 +93,18 @@ const SCRIPT_CACHE = CacheService.getScriptCache();
 const EVENT_CACHE_PREFIX = 'Class ';
 const CACHE_TTL = 60 * 60 * 2; // two hours
 
-function getCachedEvent(id) {
-  const value = SCRIPT_CACHE.get(EVENT_CACHE_PREFIX + id);
-  if (value) {
-    return JSON.parse(value);
-  }
-  return null;
+/**
+ * Returns true if the event matches the cached event, indicating it
+ * has already been synced to the calendar. This checks that the data
+ * is the same as well, to support changes to the event generation
+ * logic or configuration.
+ */
+function checkEventAlreadySynced(event) {
+  const cachedEvent = SCRIPT_CACHE.get(EVENT_CACHE_PREFIX + event.iCalUID);
+  // JSON serialization is used for deep equality, which may
+  // not work if attribute order differs. Thankfully here it
+  // does not differ.
+  return cachedEvent && cachedEvent == JSON.stringify(event);
 }
 
 function setCachedEvent(event) {
