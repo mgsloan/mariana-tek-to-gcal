@@ -23,7 +23,11 @@ function syncMarianaTekToCalendar() {
     let fetchNumber = 0;
     while (true) {
       fetchNumber += 1;
-      const response = diagnostics.withRateLimitingRetry('Fetch (#${fetchNumber})', 10, () => fetcher.fetchPage());
+      const response = diagnostics.withRetry(
+        'Fetch (#${fetchNumber})',
+        10,
+        (e) => e.toString().includes('Address unavailable'),
+        () => fetcher.fetchPage());
 
       if (response === null) {
         return;
@@ -356,6 +360,20 @@ class Diagnostics {
    * Retry count is limited to the number passed to 'retryLimit'.
    */
   withRateLimitingRetry(contextString, retryLimit, f) {
+    return this.withRetry(
+        contextString,
+        retryLimit,
+        (e) => e.toString().includes('Rate Limit Exceeded'),
+        f
+    );
+  }
+
+ /**
+  * Runs the provided function and retries it after sleeping 2 seconds
+  * if it throws an error that matches the provided predicate. Retry
+  * count is limited to the number passed to 'retryLimit'.
+  */
+  withRetry(contextString, retryLimit, shouldRetry, f) {
     return this.withContext(contextString, () => {
       let retryCount = 0;
       while (retryCount < retryLimit) {
@@ -363,7 +381,7 @@ class Diagnostics {
         try {
           return f();
         } catch (e) {
-          if (e.toString().includes('Rate Limit Exceeded')) {
+          if (shouldRetry(e)) {
             Utilities.sleep(2000);
             retryCount += 1;
             console.log(`Retry #${retryCount} for ${contextString} slept for 2 seconds due to Rate Limiting.`);

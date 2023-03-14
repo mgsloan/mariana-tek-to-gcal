@@ -6,7 +6,11 @@ function syncMarianaTekToCalendar() {
     let fetchNumber = 0;
     while (true) {
       fetchNumber += 1;
-      const response = diagnostics.withRateLimitingRetry('Fetch (#${fetchNumber})', 10, () => fetcher.fetchPage());
+      const response = diagnostics.withRetry(
+        'Fetch (#${fetchNumber})',
+        10,
+        (e) => e.toString().includes('Address unavailable'),
+        () => fetcher.fetchPage());
 
       if (response === null) {
         return;
