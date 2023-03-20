@@ -1,2 +1,6 @@
+.clasp.json
+config/
 node_modules/
+output/
+!output/MarianaTekToGCal.js
 package-lock.json

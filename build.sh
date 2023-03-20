@@ -1,5 +1,5 @@
 #!/bin/bash
-OUTPUT="MarianaTekToGCal.js"
+OUTPUT="output/MarianaTekToGCal.js"
 
 function add_file {
   cat "$1" >> "$OUTPUT";
