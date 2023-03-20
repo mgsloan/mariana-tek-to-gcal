@@ -19,7 +19,6 @@ class Diagnostics {
     const instance = new Diagnostics;
     instance.__errors = [];
     instance.__contexts = [];
-    instance.__logErrors = false;
     // Attempt to exit more informatively by limiting execution time
     // to 10 seconds less than the 6 minute limit.
     instance.__executionTimeLimitMillis = (60 * 6 - 10) * 1000;
@@ -34,22 +33,14 @@ class Diagnostics {
           instance.reportError(e);
         }
       } finally {
+        instance.__exited = true;
         if (instance.__errors.length === 1 && mainErrorWasTimeLimitExceeded) {
           throw new ScriptExecutionTimeLimitExceeded();
         } else if (instance.__errors.length > 0) {
           throw new MultiError(instance.__errors);
         }
-        instance.__exited = true;
       }
     });
-  }
-
-  /**
-   * Set this to true to cause failures to also be immediately logged.
-   * This is particularly helpful during development.
-   */
-  setLogErrors(logErrors) {
-    this.__logErrors = logErrors;
   }
 
   /**
@@ -77,9 +68,7 @@ class Diagnostics {
       context: [...this.__contexts],
       message: message,
     };
-    if (this.__logErrors) {
-      console.error(message);
-    }
+    console.error(message);
     this.__errors.push(error);
     this.checkScriptTimeLimit();
   }
@@ -149,6 +138,7 @@ class Diagnostics {
   // TODO: decorate exceptions
   withContext(contextString, f) {
     if (contextString) {
+      console.log(`Starting ${contextString}`);
       this.__contexts.push(contextString);
     }
     let result = null;
@@ -159,8 +149,9 @@ class Diagnostics {
       if (contextString) {
         const poppedContextString = this.__contexts.pop();
         if (poppedContextString !== contextString) {
-            this.__internalError('popped context string did not match pushed.');
+          this.__internalError('popped context string did not match pushed.');
         }
+        console.log(`Finished ${contextString}`);
       }
     }
     return result;
@@ -181,7 +172,7 @@ class Diagnostics {
   }
 
   __internalError(message) {
-    this.logError(`Internal error in Diagnostics: ${message}`);
+    this.reportError(`Internal error in Diagnostics: ${message}`);
   }
 }
 
