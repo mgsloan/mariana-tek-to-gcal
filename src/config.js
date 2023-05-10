@@ -1,16 +1,27 @@
-const BRAND = 'BRAND_HERE';
-const INCLUDE_RESERVE_LINK = true;
-const INCLUDE_PHONE_NUMBER = false;
-const INCLUDE_EMAIL = true;
-const INCLUDE_ADDRESS = true;
-const LOCATION_MODE = 'concise';
-const CUSTOM_PREFIX = "";
-const CUSTOM_SUFFIX = "";
+const CONFIG = {
+  sources: [
+    MarianaTek({
+      // Name used for logging and error reporting
+      name: 'My Mariana Tek Event Source',
 
-const DAYS_TO_FETCH = 30;
+      // A prefix added to calendar IDs, to distinguish which source produced it.
+      // Note that if you change this and don't delete events that use the old
+      // prefix, it will cause duplicate events.
+      idPrefix: 'imported-',
 
-const DEFAULT_TARGET_CALENDAR = 'primary';
+      // Source-specific fields:
 
-const LOCATION_TO_TARGET_CALENDAR = {
-  'Calendar name': 'some-calendar@gmail.com',
+      brand: 'BRAND_HERE',
+      pastDaysToFetch: 1,
+      futureDaysToFetch: 30,
+      includeReserveLink: true,
+      includePhoneNumber: false,
+      includeEmail: true,
+      includeAddress: true,
+      locationMode: CONCISE_LOCATION,
+      customPrefix: '',
+      customSuffix: '',
+      targetCalendar: 'primary',
+    }),
+  ],
 };

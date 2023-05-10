@@ -24,7 +24,7 @@ function getDaysAgo(days) {
 }
 
 function parseDate(dateString) {
-  const result = Date.parse(dateString)
+  const result = Date.parse(dateString);
   if (!result) {
     throw Error(`Failed to parse date "${dateString}"`);
   }
@@ -35,4 +35,17 @@ function toUtcDateString(datetime) {
   return datetime.getUTCFullYear().toString() + '-' +
     (datetime.getUTCMonth() + 1).toString().padStart(2, '0') + '-' +
     datetime.getUTCDate().toString().padStart(2, '0');
+}
+
+function shuffled(input) {
+  return input
+    .map(value => ({ value, sort: Math.random() }))
+    .sort((a, b) => a.sort - b.sort)
+    .map(({ value }) => value);
+}
+
+function assert(condition, message) {
+  if (!condition) {
+    throw new Error(message);
+  }
 }
