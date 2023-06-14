@@ -38,7 +38,9 @@ let cachedNumber = 0;
 
 function syncEventToCalendar(diagnostics, source, fetchResult) {
   const id = fetchResult.id;
-  diagnostics.withErrorRecording(`Processing "${fetchResult.name}" event with ID ${id}`, () => {
+  const processingMessage =
+        `Processing "${fetchResult.name}" event with ID ${id} at ${fetchResult.start_datetime}`;
+  diagnostics.withErrorRecording(processingMessage, () => {
     const event = source.makeEvent(fetchResult);
     for (const targetCalendar of source.getTargetCalendars(fetchResult)) {
       // Only import events if they are missing or different in cache.
