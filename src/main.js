@@ -51,29 +51,15 @@ function syncEventToCalendar(diagnostics, source, fetchResult) {
 
       if (event.status === 'cancelled') {
         cancelNumber += 1;
-        diagnostics.withErrorRecording(null, () => {
-          diagnostics.withRateLimitingRetry(`Cancel calendar event (#${cancelNumber})`, 10, () => {
-            try {
-              Calendar.Events.remove(targetCalendar, event.id);
-            } catch (exception) {
-              const message = exception.toString();
-              if (!message.includes("GoogleJsonResponseException") ||
-                  !message.includes("Not Found")) {
-                throw exception;
-              }
-            }
-          });
-          markEventSynced(targetCalendar, event);
-        });
       } else {
         syncNumber += 1;
-        diagnostics.withErrorRecording(null, () => {
-          diagnostics.withRateLimitingRetry(`Sync to calendar (#${syncNumber})`, 10, () => {
-            Calendar.Events.import(event, targetCalendar);
-          });
-          markEventSynced(targetCalendar, event);
-        });
       }
+      diagnostics.withErrorRecording(null, () => {
+        diagnostics.withRateLimitingRetry(`Sync to calendar (#${syncNumber})`, 10, () => {
+          Calendar.Events.import(event, targetCalendar);
+        });
+        markEventSynced(targetCalendar, event);
+      });
     }
   });
 }

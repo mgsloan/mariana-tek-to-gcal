@@ -115,10 +115,6 @@ class MarianaTek {
   }
 
   makeEvent(fetchResult) {
-    if (fetchResult.is_cancelled) {
-      return { status: 'cancelled', id: fetchResult.id };
-    }
-
     let summary = fetchResult.name;
 
     const names = fetchResult.instructors.map(x => x.name.trim()).filter(x => x);
@@ -152,7 +148,7 @@ class MarianaTek {
     const endDateTime = new Date(startDateTime.getTime() + durationMillis);
 
     const event = {
-      status: 'confirmed',
+      status: fetchResult.is_cancelled ? 'cancelled' : 'confirmed',
       iCalUID: fetchResult.id,
       summary: summary,
       description: description,
