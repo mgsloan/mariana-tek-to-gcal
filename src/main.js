@@ -1,5 +1,4 @@
-function syncAllSourcesToCalendars() {
-  const config = userConfig();
+function syncAllSourcesToCalendars(config) {
   Diagnostics.withErrorAggregation('Sync to Calendars', diagnostics => {
     // Shuffle sources so that if one uses up all the time, the others still
     // eventually make progress.
