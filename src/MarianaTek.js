@@ -119,7 +119,7 @@ class MarianaTek {
 
     const names = fetchResult.instructors.map(x => x.name.trim()).filter(x => x);
     const firstNames = names.map(x => x.split(' ')[0]);
-    if (names) {
+    if (names.length) {
       summary += ` with ${toNaturalList(firstNames)}`;
     }
 
