@@ -96,7 +96,23 @@ class MarianaTek {
     };
   }
 
-  getTargetCalendars(fetchResult) {
+  getAllTargetCalendars() {
+    if (this.locationToTargetCalendars) {
+      const calendars = []
+      for (const [location, calendarsToAdd] of Object.entries(this.locationToTargetCalendars)) {
+        for (const calendar of calendarsToAdd) {
+          calendars.push(calendar);
+        }
+      }
+      return calendars;
+    } else if (this.targetCalendar) {
+      return [this.targetCalendar];
+    } else {
+      throw new Error('Invalid target calendar configuration.');
+    }
+  }
+
+  getTargetCalendarsForFetchResult(fetchResult) {
     if (this.locationToTargetCalendars) {
       const location = fetchResult.location?.name;
       if (!location) {

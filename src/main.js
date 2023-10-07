@@ -1,16 +1,53 @@
-function syncAllSourcesToCalendars(config) {
+function runWithoutCache() {
+  run({ withoutCache: true});
+}
+
+function clearCalendars() {
+  run({ withoutCache: true, clearEvents: true });
+}
+
+function syncAllSourcesToCalendars(config, options) {
   Diagnostics.withErrorAggregation('Sync to Calendars', diagnostics => {
     // Shuffle sources so that if one uses up all the time, the others still
     // eventually make progress.
     for (const source of shuffled(config.sources)) {
-      diagnostics.withErrorRecording(`Syncing source "${source.name}"`, () => {
-        syncSourceToCalendars(diagnostics, source);
-      });
+      if (options.clearEvents) {
+        diagnostics.withErrorRecording(`Clearing source "${source.name}"`, () => {
+          for (const calendar of source.getAllTargetCalendars()) {
+            diagnostics.withErrorRecording(`Clearing calendar "${calendar}"`, () => {
+              clearEventsInCalendar(diagnostics, config, source, calendar);
+            });
+          }
+        });
+      } else {
+        diagnostics.withErrorRecording(`Syncing source "${source.name}"`, () => {
+          syncSourceToCalendars(diagnostics, options, source);
+        });
+      }
     }
   });
 }
 
-function syncSourceToCalendars(diagnostics, source) {
+function clearEventsInCalendar(diagnostics, config, source, calendar) {
+  let keepGoing = true;
+  while (keepGoing) {
+    keepGoing = false;
+    const listResponse = Calendar.Events.list(calendar, {
+      timeMin: getDaysAgo(source.pastDaysToFetch).toISOString()
+    });
+    for (const event of listResponse.items) {
+      if (event.iCalUID.startsWith(source.idPrefix)) {
+        diagnostics.withErrorRecording(`Deleting ${event.summary}`, () => {
+          Calendar.Events.remove(calendar, event.id);
+          // Deleted something so there may be more to do.
+          keepGoing = true;
+        });
+      }
+    }
+  }
+}
+
+function syncSourceToCalendars(diagnostics, options, source) {
   let fetchNumber = 0;
   while (true) {
     fetchNumber += 1;
@@ -19,7 +56,7 @@ function syncSourceToCalendars(diagnostics, source) {
     console.log(`Fetched ${response.results.length} events from "${source.name}"`);
 
     for (const fetchResult of response.results) {
-      syncEventToCalendar(diagnostics, source, fetchResult);
+      syncEventToCalendar(diagnostics, options, source, fetchResult);
     }
 
     console.log(`Cumulative Errors: ${diagnostics.getErrorCount()}`);
@@ -36,15 +73,15 @@ let syncNumber = 0;
 let cancelNumber = 0;
 let cachedNumber = 0;
 
-function syncEventToCalendar(diagnostics, source, fetchResult) {
+function syncEventToCalendar(diagnostics, options, source, fetchResult) {
   const id = fetchResult.id;
   const processingMessage =
         `Processing "${fetchResult.name}" event with ID ${id} at ${fetchResult.start_datetime}`;
   diagnostics.withErrorRecording(processingMessage, () => {
     const event = source.makeEvent(fetchResult);
-    for (const targetCalendar of source.getTargetCalendars(fetchResult)) {
+    for (const targetCalendar of source.getTargetCalendarsForFetchResult(fetchResult)) {
       // Only import events if they are missing or different in cache.
-      if (checkEventAlreadySynced(targetCalendar, event)) {
+      if (!options['withoutCache'] && checkEventAlreadySynced(targetCalendar, event)) {
         cachedNumber += 1;
         return;
       }

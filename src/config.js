@@ -1,4 +1,4 @@
-function run() {
+function run(options) {
   const config = {
     sources: [
       MarianaTek({
@@ -27,5 +27,5 @@ function run() {
     ],
   };
 
-  syncAllSourcesToCalendars(config);
+  syncAllSourcesToCalendars(config, options);
 };
