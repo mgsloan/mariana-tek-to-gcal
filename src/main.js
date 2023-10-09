@@ -7,11 +7,14 @@ function clearCalendars() {
 }
 
 function syncAllSourcesToCalendars(config, options) {
+  if (!options) {
+    options = {};
+  }
   Diagnostics.withErrorAggregation('Sync to Calendars', diagnostics => {
     // Shuffle sources so that if one uses up all the time, the others still
     // eventually make progress.
     for (const source of shuffled(config.sources)) {
-      if (options.clearEvents) {
+      if (options['clearEvents']) {
         diagnostics.withErrorRecording(`Clearing source "${source.name}"`, () => {
           for (const calendar of source.getAllTargetCalendars()) {
             diagnostics.withErrorRecording(`Clearing calendar "${calendar}"`, () => {
