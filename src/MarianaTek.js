@@ -62,25 +62,39 @@ class MarianaTek {
   }
 
   fetchPage(diagnostics, fetchNumber) {
-    const response = diagnostics.withRetry(
-      `Fetch #${fetchNumber} for ${this.name}`,
-      10,
-      (e) => e.toString().includes('Address unavailable'),
-      () => {
-        const rawResponse = UrlFetchApp.fetch(this.url, { headers: {'ACCEPT': 'application/json'}});
-        const responseCode = rawResponse.getResponseCode();
-        if (responseCode !== 200) {
-          throw new Error(`MarianaTek responded with ${rawResponse.getResponseCode()}:\n${rawResponse.getContentText()}`);
-        }
-        const response = JSON.parse(rawResponse.getContentText());
-        return response;
-      });
+    let response;
+    try {
+      response = diagnostics.withRetry(
+        `Fetch #${fetchNumber} for ${this.name}`,
+        10,
+        (e) => {
+          const shouldRetry = e.toString().includes('Address unavailable');
+          return shouldRetry;
+        },
+        () => {
+          const rawResponse = UrlFetchApp.fetch(this.url, { headers: {'ACCEPT': 'application/json'}});
+          const responseCode = rawResponse.getResponseCode();
+          if (responseCode !== 200) {
+            throw new Error(`MarianaTek responded with ${rawResponse.getResponseCode()}:\n${rawResponse.getContentText()}`);
+          }
+          const response = JSON.parse(rawResponse.getContentText());
+          return response;
+        });
 
-    if (!response || response.results.length === 0) {
-      return {
-        results: [],
-        keepGoing: false,
-      };
+      if (!response || response.results.length === 0) {
+        return {
+          results: [],
+          keepGoing: false,
+        };
+      }
+    } catch (e) {
+      // TODO: This sort of thing could cause silent outage. Track
+      // last successful sync and complain if it's been a while.
+      if (e.toString().includes('Site Maintenance')) {
+        console.error('Ignoring known intermittent fetch error:', e);
+        return { results: [], keepGoing: false };
+      }
+      throw e;
     }
 
     this.url = response.links?.next;
