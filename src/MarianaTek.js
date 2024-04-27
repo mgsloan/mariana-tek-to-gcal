@@ -97,7 +97,7 @@ class MarianaTek {
       throw e;
     }
 
-    this.url = response.links?.next;
+    this.url = response?.next || response?.links?.next;
 
     const sessionTimes = response.results.map(session => parseDate(session.start_datetime).getTime());
     const lastSessionEpochMillis = Math.max(...sessionTimes);
